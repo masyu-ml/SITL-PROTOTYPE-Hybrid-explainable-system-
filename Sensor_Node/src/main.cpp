@@ -4,8 +4,8 @@
 #include "LittleFS.h"
 
 // --- NETWORK CREDENTIALS ---
-const char* ssid = "RMB 2.4G";             
-const char* password = "@Basilio115529"; 
+const char* ssid = "***";             
+const char* password = "***"; 
 
 // --- TARGET LAPTOP IP ---
 const char* laptopIP = "192.168.1.6";     
@@ -15,124 +15,131 @@ WiFiUDP udp;
 File dataFile;
 bool isPlaying = false; 
 
-// --- FAULT INJECTION STATES ---
-bool injectShortCircuit = false;
-bool injectOpenCircuit = false;
-bool injectOverheating = false;
-float artificialHeat = 0.0; 
+void jumpToFault(String faultStr) {
+  if (!dataFile) {
+      dataFile = LittleFS.open("/BACHA_PRESENT_STATE.csv", "r");
+      if(!dataFile) dataFile = LittleFS.open("BACHA_PRESENT_STATE.csv", "r");
+  }
+  
+  if (!dataFile) { 
+    Serial.println("\n[!] ERROR: Cannot inject fault. CSV File is missing!"); 
+    return; 
+  }
+
+  Serial.println("\n[>] FAULT INJECTION TRIGGERED: " + faultStr);
+  dataFile.seek(0); 
+  if (dataFile.available()) dataFile.readStringUntil('\n'); 
+
+  bool found = false;
+  while (dataFile.available()) {
+      size_t startPos = dataFile.position();
+      String line = dataFile.readStringUntil('\n');
+      if (line.indexOf(faultStr) != -1) {
+          dataFile.seek(startPos); 
+          isPlaying = true;
+          found = true;
+          Serial.println("[+] SUCCESS: Synced to real '" + faultStr + "' telemetry.");
+          break;
+      }
+  }
+  if (!found) Serial.println("[!] WARNING: Label '" + faultStr + "' not found in dataset.");
+}
 
 void setup() {
   Serial.begin(115200);
   delay(1000);
+  Serial.println("\n\n========================================");
+  Serial.println("   AUTONOMOUS NODE: HARDWARE BOOTUP     ");
+  Serial.println("========================================");
 
+  // 1. Storage Check
+  Serial.print("[1/3] Initializing LittleFS... ");
   if(!LittleFS.begin(true)){ 
-    Serial.println("CRITICAL: LittleFS Mount Failed!"); 
+    Serial.println("FAILED!"); 
     return; 
   }
-  Serial.println("LittleFS Mounted.");
+  Serial.println("OK.");
 
-  // --- DIAGNOSTIC: LIST ALL FILES ---
-  Serial.println("Scanning Filesystem...");
-  File root = LittleFS.open("/");
-  File file = root.openNextFile();
-  while(file){
-      Serial.print("Found File: ");
-      Serial.println(file.name());
-      file = root.openNextFile();
+  // 2. File Check
+  Serial.print("[2/3] Locating BACHA_PRESENT_STATE.csv... ");
+  if (LittleFS.exists("/BACHA_PRESENT_STATE.csv") || LittleFS.exists("BACHA_PRESENT_STATE.csv")) {
+    File temp = LittleFS.open("/BACHA_PRESENT_STATE.csv", "r");
+    if(!temp) temp = LittleFS.open("BACHA_PRESENT_STATE.csv", "r");
+    Serial.println("FOUND.");
+    Serial.printf("      Dataset Size: %d bytes\n", temp.size());
+    temp.close();
+  } else {
+    Serial.println("NOT FOUND!");
+    Serial.println("      Please upload the CSV via Sketch Data Upload.");
   }
 
-  Serial.print("Connecting to Wi-Fi: ");
+  // 3. Connection Check
+  Serial.print("[3/3] Connecting to WiFi [" + String(ssid) + "] ");
   WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) { delay(500); Serial.print("."); }
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
   
-  Serial.println("\n--- WI-FI CONNECTED ---");
-  Serial.print("ESP32 IP: ");
-  Serial.println(WiFi.localIP());
+  Serial.println("\n\n--- NETWORK ESTABLISHED ---");
+  Serial.print(">> ESP32 IP ADDRESS: ");
+  Serial.println(WiFi.localIP());  // <--- Copy this IP to your Python Software
+  Serial.println("----------------------------\n");
   
   udp.begin(udpPort);
-  Serial.println("SYSTEM READY: Awaiting UDP Command...");
+  Serial.println("[READY] Awaiting UDP commands from Python dashboard...");
 }
 
 void loop() {
-  // --- LISTEN FOR WIRELESS COMMANDS ---
   int packetSize = udp.parsePacket();
   if (packetSize) {
     char incomingPacket[255];
     int len = udp.read(incomingPacket, 255);
     if (len > 0) { incomingPacket[len] = 0; }
-    
     String command = String(incomingPacket);
     command.trim();
-    Serial.println("Received: " + command);
+    
+    Serial.println("[RECV] Command: " + command);
     
     if (command == "RESUME") {
       if (!dataFile) {
           dataFile = LittleFS.open("/BACHA_PRESENT_STATE.csv", "r");
-          // Fallback for different LittleFS naming conventions
           if(!dataFile) dataFile = LittleFS.open("BACHA_PRESENT_STATE.csv", "r");
+          if (dataFile && dataFile.available()) dataFile.readStringUntil('\n'); 
       }
-
-      if (dataFile) {
-          isPlaying = true; 
-          Serial.println("STATUS: DATA FOUND - STARTING STREAM");
-      } else {
-          Serial.println("ERROR: File not found on Flash.");
-      }
+      isPlaying = true;
+      Serial.println("[STATE] Mission Resumed.");
     }
     else if (command == "PAUSE") { 
       isPlaying = false; 
-      Serial.println("STATUS: PAUSED");
+      Serial.println("[STATE] Mission Paused.");
     }
     else if (command == "RESET") {
-      isPlaying = false; // Stop streaming while resetting
+      isPlaying = false;
       if (dataFile) {
-          dataFile.seek(0); // Move "needle" to start of file
-          // Optional: If your CSV has headers, skip the first line
+          dataFile.seek(0); 
           if(dataFile.available()) dataFile.readStringUntil('\n'); 
-          Serial.println("SYSTEM RESET: Data set to beginning.");
-      } else {
-          Serial.println("RESET ERROR: File not open.");
+          Serial.println("[STATE] Vehicle Reset to Start.");
       }
     }
-    else if (command == "INJECT_SHORT") { injectShortCircuit = true; Serial.println("FAULT: Short Circuit Injected"); }
-    else if (command == "INJECT_OPEN")  { injectOpenCircuit = true; Serial.println("FAULT: Open Circuit Injected"); }
-    else if (command == "INJECT_HEAT")  { injectOverheating = true; Serial.println("FAULT: Overheating Injected"); }
-    else if (command == "CLEAR_FAULTS") {
-        injectShortCircuit = false;
-        injectOpenCircuit = false;
-        injectOverheating = false;
-        artificialHeat = 0.0;
-        Serial.println("STATUS: ALL FAULTS CLEARED");
+    else if (command == "INJECT_SHORT") { jumpToFault("short_circuit"); }
+    else if (command == "INJECT_OPEN")  { jumpToFault("open_circuit"); }
+    else if (command == "INJECT_HEAT")  { jumpToFault("overheating"); }
+    else if (command == "CLEAR_FAULTS") { 
+      if(dataFile) dataFile.seek(0); 
+      Serial.println("[STATE] Faults Cleared.");
     }
   }
 
-  // --- CSV TELEMETRY STREAMING ---
   if (isPlaying && dataFile && dataFile.available()) {
     String telemetryLine = dataFile.readStringUntil('\n');
-    
-    // --- FAULT INJECTION OVERRIDE ---
-    if (injectShortCircuit) { 
-        telemetryLine = "99999,500.0,1.2,60.0,0,0,0,0,0,0,0,0,0,0,0,fault,F1"; 
-    } 
-    else if (injectOpenCircuit) { 
-        telemetryLine = "99999,0.0,0.0,25.0,0,0,0,0,0,0,0,0,0,0,0,fault,F2"; 
-    } 
-    else if (injectOverheating) {
-        artificialHeat += 2.5; 
-        telemetryLine = "99999,10.5,12.0," + String(40.0 + artificialHeat) + ",0,0,0,0,0,0,0,0,0,0,0,fault,F3";
-    }
+    telemetryLine.trim();
 
-    // Wireless Broadcast to Laptop
-    udp.beginPacket(laptopIP, udpPort);
-    udp.print(telemetryLine);
-    udp.endPacket();
-    
-    delay(50); // 20Hz Sampling Rate
+    if (telemetryLine.length() > 5) {
+        udp.beginPacket(laptopIP, udpPort);
+        udp.print(telemetryLine);
+        udp.endPacket();
+    }
+    delay(50); 
   } 
-  
-  // End of File reached
-  if (isPlaying && dataFile && !dataFile.available()) {
-    isPlaying = false;
-    Serial.println("STATUS: END OF DATASET");
-  }
 }
